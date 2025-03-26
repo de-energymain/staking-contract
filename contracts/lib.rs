@@ -2,11 +2,12 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use std::convert::TryFrom;
 
-declare_id!("5t8beb81aMa7ut8j4XXKQi6LVYAgTT59P5S3NSpf23Hc");
+declare_id!("GSfUNKHDxz9yyMjJx1wKSwi7T3maasWPzj8kfksGPQ6n");
 
 const MULTIPLIER: u64 = 1_000_000_000_000_000_000;
-const LOCK_PERIOD: i64 = 180 * 24 * 60 * 60;
-const UNBONDING_PERIOD: i64 = 15 * 24 * 60 * 60;
+// For testing only
+const LOCK_PERIOD: i64 = 5 * 60; // 5 minutes instead of 180 days
+const UNBONDING_PERIOD: i64 = 2 * 60; // 2 minutes instead of 15 days
 
 #[program]
 pub mod discrete_staking_rewards {
@@ -27,13 +28,20 @@ pub mod discrete_staking_rewards {
 
     pub fn stake(ctx: Context<Stake>, amount: u64) -> Result<()> {
         require!(amount > 0, StakingError::CannotStakeZero);
+        if ctx.accounts.user_state.owner == Pubkey::default() {
+            ctx.accounts.user_state.owner = ctx.accounts.user.key();
+        }
         const MAX_ACTIVE_STAKES: usize = 50;
-        let active_stakes = ctx.accounts.user_state.stakes
+        let active_stakes = ctx
+            .accounts
+            .user_state
+            .stakes
             .iter()
             .filter(|stake| stake.amount > 0)
             .count();
         if active_stakes >= MAX_ACTIVE_STAKES {
-            let similar_stake_index = find_similar_stake(&ctx.accounts.user_state.stakes, 24 * 60 * 60);
+            let similar_stake_index =
+                find_similar_stake(&ctx.accounts.user_state.stakes, 24 * 60 * 60);
             if let Some(index) = similar_stake_index {
                 ctx.accounts.user_state.stakes[index].amount += amount;
                 ctx.accounts.user_state.balance += amount;
@@ -103,30 +111,33 @@ pub mod discrete_staking_rewards {
         max_iterations: Option<u64>,
     ) -> Result<()> {
         require!(amount > 0, StakingError::CannotUnstakeZero);
-        require!(ctx.accounts.user_state.balance >= amount, StakingError::InsufficientBalance);
+        require!(
+            ctx.accounts.user_state.balance >= amount,
+            StakingError::InsufficientBalance
+        );
         let user_state = &mut ctx.accounts.user_state;
         let staking_pool = &mut ctx.accounts.staking_pool;
         let reward_vault = &ctx.accounts.reward_vault;
         let user_reward_account = &ctx.accounts.user_reward_account;
         let token_program = &ctx.accounts.token_program;
-        let seeds = &[
-            b"staking_pool".as_ref(),
-            &[staking_pool.bump],
-        ];
+        let seeds = &[b"staking_pool_v2".as_ref(), &[staking_pool.bump]];
         let signer = &[&seeds[..]];
         claim_internal(
-            user_state, 
+            user_state,
             staking_pool,
             reward_vault,
             user_reward_account,
             token_program,
-            signer
+            signer,
         )?;
         let clock = Clock::get()?;
         let current_time = clock.unix_timestamp;
         let start = start_index.unwrap_or(0) as usize;
         let max_iter = max_iterations.unwrap_or(25) as usize;
-        require!(start < user_state.stakes.len(), StakingError::InvalidStartIndex);
+        require!(
+            start < user_state.stakes.len(),
+            StakingError::InvalidStartIndex
+        );
         let mut remaining_amount = amount;
         let mut unlocked_amount = 0;
         let mut processed_amount = 0;
@@ -171,10 +182,7 @@ pub mod discrete_staking_rewards {
         Ok(())
     }
 
-    pub fn withdraw(
-        ctx: Context<Withdraw>,
-        max_requests: Option<u64>,
-    ) -> Result<()> {
+    pub fn withdraw(ctx: Context<Withdraw>, max_requests: Option<u64>) -> Result<()> {
         let clock = Clock::get()?;
         let current_time = clock.unix_timestamp;
         let mut withdrawable_amount = 0;
@@ -192,7 +200,7 @@ pub mod discrete_staking_rewards {
         }
         require!(withdrawable_amount > 0, StakingError::NoWithdrawableAmount);
         let seeds = &[
-            b"staking_pool".as_ref(),
+            b"staking_pool_v2".as_ref(),
             &[ctx.accounts.staking_pool.bump],
         ];
         let signer = &[&seeds[..]];
@@ -223,13 +231,19 @@ pub mod discrete_staking_rewards {
             }
         }
         if processed_count < max {
-            ctx.accounts.user_state.unbonding_requests.retain(|r| !r.withdrawn);
+            ctx.accounts
+                .user_state
+                .unbonding_requests
+                .retain(|r| !r.withdrawn);
         }
         emit!(WithdrawnEvent {
             user: ctx.accounts.user.key(),
             amount: withdrawable_amount,
         });
-        let remaining_withdrawals = ctx.accounts.user_state.unbonding_requests
+        let remaining_withdrawals = ctx
+            .accounts
+            .user_state
+            .unbonding_requests
             .iter()
             .filter(|r| !r.withdrawn && current_time >= r.unbonding_end_time)
             .count();
@@ -249,7 +263,7 @@ pub mod discrete_staking_rewards {
         if reward > 0 {
             user_state.earned = 0;
             let seeds = &[
-                b"staking_pool".as_ref(),
+                b"staking_pool_v2".as_ref(),
                 &[ctx.accounts.staking_pool.bump],
             ];
             let signer = &[&seeds[..]];
@@ -279,12 +293,10 @@ pub mod discrete_staking_rewards {
         let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
         token::transfer(cpi_ctx, amount)?;
         update_reward_index(&mut ctx.accounts.staking_pool, amount)?;
-        emit!(RewardsAddedEvent {
-            amount,
-        });
+        emit!(RewardsAddedEvent { amount });
         Ok(())
     }
-    
+
     pub fn consolidate_stakes(ctx: Context<ConsolidateStakes>, time_window: i64) -> Result<()> {
         require!(time_window > 0, StakingError::InvalidTimeWindow);
         let user_state = &mut ctx.accounts.user_state;
@@ -314,10 +326,19 @@ pub mod discrete_staking_rewards {
         });
         Ok(())
     }
+
+    pub fn update_user_owner(ctx: Context<UpdateUserOwner>) -> Result<()> {
+        ctx.accounts.user_state.owner = ctx.accounts.user.key();
+        Ok(())
+    }
 }
 
 fn update_rewards(user_state: &mut Account<UserState>, current_reward_index: u128) {
-    let rewards = calculate_rewards(user_state.balance, current_reward_index, user_state.reward_index_of);
+    let rewards = calculate_rewards(
+        user_state.balance,
+        current_reward_index,
+        user_state.reward_index_of,
+    );
     user_state.earned += rewards;
     user_state.reward_index_of = current_reward_index;
 }
@@ -340,7 +361,9 @@ fn update_reward_index(staking_pool: &mut Account<StakingPool>, reward: u64) -> 
     let supply_u128 = u128::from(staking_pool.total_supply);
     let multiplier_u128 = u128::from(MULTIPLIER);
     let index_delta = reward_u128 * multiplier_u128 / supply_u128;
-    staking_pool.reward_index = staking_pool.reward_index.checked_add(index_delta)
+    staking_pool.reward_index = staking_pool
+        .reward_index
+        .checked_add(index_delta)
         .ok_or(StakingError::ArithmeticOverflow)?;
     Ok(())
 }
@@ -353,7 +376,8 @@ fn find_similar_stake(stakes: &[StakeInfo], time_window: i64) -> Option<usize> {
             return Some(i);
         }
     }
-    stakes.iter()
+    stakes
+        .iter()
         .enumerate()
         .filter(|(_, stake)| stake.amount > 0)
         .max_by_key(|(_, stake)| stake.timestamp)
@@ -529,7 +553,7 @@ pub struct Initialize<'info> {
         init,
         payer = authority,
         space = 8 + std::mem::size_of::<StakingPool>(),
-        seeds = [b"staking_pool"],
+        seeds = [b"staking_pool_v2"],
         bump
     )]
     pub staking_pool: Account<'info, StakingPool>,
@@ -728,6 +752,22 @@ pub struct ConsolidateStakes<'info> {
         constraint = user_state.owner == user.key()
     )]
     pub user_state: Account<'info, UserState>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateUserOwner<'info> {
+    #[account(mut)]
+    pub staking_pool: Account<'info, StakingPool>,
+
+    #[account(
+        mut,
+        seeds = [b"user_state", staking_pool.key().as_ref(), user.key().as_ref()],
+        bump
+    )]
+    pub user_state: Account<'info, UserState>,
+
     #[account(mut)]
     pub user: Signer<'info>,
 }
